@@ -17,17 +17,22 @@ import {
   AlertCircle,
   RefreshCw,
   AlertTriangle,
+  Download,
+  PackageOpen,
+  Tag as TagIcon,
+  XCircle,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '@/store/useAppStore';
 import { createIconItemsFromFiles, formatDate, cn } from '@/utils';
 import { useToast } from '@/components/Toast';
-import type { IconItem, Project } from '@/types';
+import type { IconItem, Project, ImportResult } from '@/types';
 
 export default function Library() {
   const navigate = useNavigate();
   const toast = useToast();
   const inputRef = useRef<HTMLInputElement>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -40,6 +45,9 @@ export default function Library() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadStats, setLoadStats] = useState<{ total: number; loaded: number; failed: number } | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const [importDialog, setImportDialog] = useState<{ show: boolean; result: ImportResult | null }>({ show: false, result: null });
+  const [tagInput, setTagInput] = useState('');
+  const [editingIconTags, setEditingIconTags] = useState<string | null>(null);
 
   const {
     projects,
@@ -54,6 +62,11 @@ export default function Library() {
     getIconsInProject,
     setGeneratorIcons,
     updateSpriteConfig,
+    exportProject,
+    exportSelectedIcons,
+    importArchive,
+    addIconTags,
+    removeIconTag,
   } = useAppStore();
 
   const activeProject = useMemo(
@@ -199,6 +212,55 @@ export default function Library() {
     setSelectedIconIds(new Set());
   };
 
+  const handleExportProject = async () => {
+    if (!activeProjectId) return;
+    await exportProject(activeProjectId);
+  };
+
+  const handleExportSelected = async () => {
+    if (selectedIconIds.size === 0) return;
+    await exportSelectedIcons(Array.from(selectedIconIds), activeProject?.name);
+  };
+
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    const file = files[0];
+    if (!file.name.toLowerCase().endsWith('.zip') && !file.name.toLowerCase().endsWith('.sprite.zip')) {
+      toast.showWarning('请选择 .sprite.zip 或 .zip 格式的归档文件');
+      return;
+    }
+    const result = await importArchive(file);
+    setImportDialog({ show: true, result });
+    setLoadAttempt((n) => n + 1);
+    if (importInputRef.current) importInputRef.current.value = '';
+  };
+
+  const handleAddIconTag = (iconId: string) => {
+    const tag = tagInput.trim();
+    if (!tag) return;
+    addIconTags(iconId, [tag]);
+    setProjectIcons((prev) =>
+      prev.map((i) =>
+        i.id === iconId
+          ? { ...i, tags: [...new Set([...(i.tags || []), tag])] }
+          : i
+      )
+    );
+    setTagInput('');
+  };
+
+  const handleRemoveIconTag = (iconId: string, tag: string) => {
+    removeIconTag(iconId, tag);
+    setProjectIcons((prev) =>
+      prev.map((i) =>
+        i.id === iconId
+          ? { ...i, tags: (i.tags || []).filter((t) => t !== tag) }
+          : i
+      )
+    );
+  };
+
   const handleDeleteProject = async (p: Project) => {
     if (!confirm(`删除项目 "${p.name}"?`)) return;
     await deleteProject(p.id);
@@ -338,6 +400,65 @@ export default function Library() {
               <div className="text-[10px] text-slate-500 font-mono mt-0.5">
                 {icon.width}×{icon.height}
               </div>
+              {icon.tags && icon.tags.length > 0 && (
+                <div className="flex flex-wrap gap-1 mt-1.5">
+                  {icon.tags.slice(0, 3).map((tag) => (
+                    <span
+                      key={tag}
+                      className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded bg-neon-cyan/10 text-neon-cyan text-[9px] font-mono border border-neon-cyan/20"
+                    >
+                      {tag}
+                      {editingIconTags === icon.id && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleRemoveIconTag(icon.id, tag);
+                          }}
+                          className="hover:text-rose-400"
+                        >
+                          <XCircle className="w-2.5 h-2.5" />
+                        </button>
+                      )}
+                    </span>
+                  ))}
+                  {icon.tags.length > 3 && (
+                    <span className="px-1 py-0.5 text-[9px] text-slate-500 font-mono">
+                      +{icon.tags.length - 3}
+                    </span>
+                  )}
+                </div>
+              )}
+              {editingIconTags === icon.id && (
+                <div className="flex gap-1 mt-1.5" onClick={(e) => e.stopPropagation()}>
+                  <input
+                    autoFocus
+                    value={tagInput}
+                    onChange={(e) => setTagInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddIconTag(icon.id)}
+                    placeholder="添加标签..."
+                    className="flex-1 min-w-0 px-1.5 py-0.5 text-[10px] bg-ink-800 border border-ink-600 rounded text-slate-200 placeholder-slate-500 focus:outline-none focus:border-neon-cyan"
+                  />
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleAddIconTag(icon.id);
+                    }}
+                    className="px-1.5 py-0.5 text-[10px] bg-neon-cyan/20 text-neon-cyan rounded hover:bg-neon-cyan/30"
+                  >
+                    <Check className="w-3 h-3" />
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setEditingIconTags(null);
+                      setTagInput('');
+                    }}
+                    className="px-1.5 py-0.5 text-[10px] bg-ink-700 text-slate-400 rounded hover:bg-ink-600"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         ))}
@@ -372,14 +493,30 @@ export default function Library() {
                 <FolderKanban className="w-4 h-4 text-neon-cyan" />
                 项目列表
               </h3>
-              <button
-                onClick={() => setShowNewProject(true)}
-                className="btn-ghost btn !px-2 !py-1 text-xs"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                新建
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => importInputRef.current?.click()}
+                  className="btn-ghost btn !px-2 !py-1 text-xs"
+                  title="导入项目归档"
+                >
+                  <PackageOpen className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => setShowNewProject(true)}
+                  className="btn-ghost btn !px-2 !py-1 text-xs"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  新建
+                </button>
+              </div>
             </div>
+            <input
+              ref={importInputRef}
+              type="file"
+              accept=".zip,.sprite.zip"
+              className="hidden"
+              onChange={handleImport}
+            />
 
             {showNewProject && (
               <div className="mb-3 p-2 bg-ink-800 rounded-lg border border-ink-600">
@@ -482,6 +619,13 @@ export default function Library() {
                             <Pencil className="w-3 h-3" />
                           </button>
                           <button
+                            onClick={(e) => { e.stopPropagation(); exportProject(p.id); }}
+                            className="w-6 h-6 rounded hover:bg-neon-cyan/20 flex items-center justify-center text-slate-500 hover:text-neon-cyan"
+                            title="导出项目"
+                          >
+                            <Download className="w-3 h-3" />
+                          </button>
+                          <button
                             onClick={(e) => { e.stopPropagation(); handleDeleteProject(p); }}
                             className="w-6 h-6 rounded hover:bg-rose-500/20 flex items-center justify-center text-slate-500 hover:text-rose-400"
                           >
@@ -553,6 +697,10 @@ export default function Library() {
                     <span className="chip bg-neon-cyan/10 text-neon-cyan border border-neon-cyan/20">
                       已选 {selectedIconIds.size}
                     </span>
+                    <button onClick={handleExportSelected} className="btn btn-secondary !py-1.5 text-xs">
+                      <Download className="w-3.5 h-3.5" />
+                      导出选中
+                    </button>
                     <button onClick={deleteSelected} className="btn btn-danger !py-1.5 text-xs">
                       <Trash2 className="w-3.5 h-3.5" />
                       删除
@@ -562,6 +710,19 @@ export default function Library() {
 
                 <div className="flex-1" />
 
+                {projectIcons.length > 0 && (
+                  <button onClick={handleExportProject} className="btn btn-secondary !py-1.5 text-xs mr-2">
+                    <Download className="w-3.5 h-3.5" />
+                    导出项目
+                  </button>
+                )}
+                <button
+                  onClick={() => importInputRef.current?.click()}
+                  className="btn btn-secondary !py-1.5 text-xs mr-2"
+                >
+                  <PackageOpen className="w-3.5 h-3.5" />
+                  导入
+                </button>
                 <button
                   onClick={() => inputRef.current?.click()}
                   className="btn btn-primary !py-1.5 text-xs"
@@ -605,6 +766,17 @@ export default function Library() {
           </button>
           <button
             onClick={() => {
+              setEditingIconTags(contextMenu.icon.id);
+              setTagInput('');
+              setContextMenu(null);
+            }}
+            className="w-full px-3 py-2 text-left text-xs text-slate-300 hover:bg-white/5 flex items-center gap-2"
+          >
+            <TagIcon className="w-3.5 h-3.5" />
+            管理标签
+          </button>
+          <button
+            onClick={() => {
               if (confirm(`删除图标 "${contextMenu.icon.name}"?`)) {
                 handleRemoveSingle(contextMenu.icon.id);
               }
@@ -614,6 +786,101 @@ export default function Library() {
             <Trash2 className="w-3.5 h-3.5" />
             删除图标
           </button>
+        </div>
+      )}
+
+      {importDialog.show && importDialog.result && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onClick={() => setImportDialog({ show: false, result: null })}
+        >
+          <div
+            className="card w-full max-w-md mx-4 p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className={cn(
+                'w-10 h-10 rounded-lg flex items-center justify-center',
+                importDialog.result.success
+                  ? 'bg-emerald-500/10 border border-emerald-500/30'
+                  : 'bg-rose-500/10 border border-rose-500/30'
+              )}>
+                {importDialog.result.success ? (
+                  <Check className="w-5 h-5 text-emerald-400" />
+                ) : (
+                  <AlertCircle className="w-5 h-5 text-rose-400" />
+                )}
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-white">
+                  {importDialog.result.success ? '导入成功' : '导入失败'}
+                </h3>
+                {importDialog.result.migratedFrom && (
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    数据已从版本 {importDialog.result.migratedFrom} 迁移
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {importDialog.result.success && (
+              <div className="grid grid-cols-2 gap-3 mb-4">
+                <div className="p-3 bg-ink-800 rounded-lg border border-ink-700">
+                  <div className="text-xs text-slate-500">导入项目</div>
+                  <div className="text-xl font-bold text-neon-cyan mt-1">
+                    {importDialog.result.projects.length}
+                  </div>
+                </div>
+                <div className="p-3 bg-ink-800 rounded-lg border border-ink-700">
+                  <div className="text-xs text-slate-500">导入图标</div>
+                  <div className="text-xl font-bold text-neon-cyan mt-1">
+                    {importDialog.result.icons.length}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {importDialog.result.warnings.length > 0 && (
+              <div className="mb-4">
+                <div className="text-xs font-medium text-neon-amber mb-2 flex items-center gap-1">
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  警告 ({importDialog.result.warnings.length})
+                </div>
+                <div className="max-h-32 overflow-y-auto space-y-1 pr-2 scrollbar-thin">
+                  {importDialog.result.warnings.map((w, i) => (
+                    <div key={i} className="text-[11px] text-neon-amber/80 bg-neon-amber/5 px-2 py-1 rounded font-mono">
+                      {w}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {importDialog.result.errors.length > 0 && (
+              <div className="mb-4">
+                <div className="text-xs font-medium text-rose-400 mb-2 flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5" />
+                  错误 ({importDialog.result.errors.length})
+                </div>
+                <div className="max-h-32 overflow-y-auto space-y-1 pr-2 scrollbar-thin">
+                  {importDialog.result.errors.map((e, i) => (
+                    <div key={i} className="text-[11px] text-rose-400/80 bg-rose-500/5 px-2 py-1 rounded font-mono">
+                      {e}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="flex justify-end">
+              <button
+                onClick={() => setImportDialog({ show: false, result: null })}
+                className="btn btn-primary !py-2 text-sm"
+              >
+                确定
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

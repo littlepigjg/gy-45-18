@@ -1,12 +1,17 @@
 import { create } from 'zustand';
-import type { IconMeta, IconItem, Project, SpriteConfig } from '../types';
-import { generateId, iconItemToMeta } from '../utils';
+import type { IconMeta, IconItem, Project, SpriteConfig, ImportResult, ExportOptions } from '../types';
+import { generateId, iconItemToMeta, downloadBlob } from '../utils';
 import {
   saveIconDataUrl,
   getIconDataUrl,
   deleteIconBlob,
   deleteIconBulk,
 } from '../utils/db';
+import {
+  createArchive,
+  parseArchive,
+  resolveIdConflicts,
+} from '../services/archiveService';
 
 const STORAGE_KEY = 'css-sprite-tool-data';
 
@@ -63,6 +68,15 @@ interface AppState {
     failed: number;
   }>;
   getIconItem: (meta: IconMeta) => Promise<IconItem | null>;
+
+  addIconTags: (iconId: string, tags: string[]) => void;
+  removeIconTag: (iconId: string, tag: string) => void;
+  addProjectTags: (projectId: string, tags: string[]) => void;
+  removeProjectTag: (projectId: string, tag: string) => void;
+
+  exportProject: (projectId: string, options?: Partial<ExportOptions>) => Promise<void>;
+  exportSelectedIcons: (iconIds: string[], projectName?: string) => Promise<void>;
+  importArchive: (file: File) => Promise<ImportResult>;
 }
 
 function loadFromStorage(): PersistedData {
@@ -75,7 +89,7 @@ function loadFromStorage(): PersistedData {
         icons: parsed.icons || [],
       };
     }
-  } catch (e) {
+  } catch {
     toastHandlers.showError('读取本地数据失败');
   }
   return { projects: [], icons: [] };
@@ -86,7 +100,7 @@ function saveToStorage(projects: Project[], icons: IconMeta[]): boolean {
     const payload = JSON.stringify({ projects, icons });
     localStorage.setItem(STORAGE_KEY, payload);
     return true;
-  } catch (e) {
+  } catch {
     toastHandlers.showError('本地存储失败，浏览器存储空间可能已满');
     return false;
   }
@@ -135,7 +149,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   removeIcon: async (id) => {
     try {
       await deleteIconBlob(id);
-    } catch (e) {
+    } catch {
       toastHandlers.showError('删除图片数据失败');
     }
 
@@ -192,7 +206,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (orphanedIds.length > 0) {
       try {
         await deleteIconBulk(orphanedIds);
-      } catch (e) {
+      } catch {
         toastHandlers.showError('清理图片数据失败');
       }
     }
@@ -262,7 +276,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         return null;
       }
       return { ...meta, dataUrl };
-    } catch (e) {
+    } catch {
       toastHandlers.showError(`加载图标 "${meta.name}" 失败`);
       return null;
     }
@@ -288,6 +302,233 @@ export const useAppStore = create<AppState>((set, get) => ({
       toastHandlers.showWarning(`成功加载 ${items.length} 个图标，${failed} 个加载失败`);
     }
     return { items, total: metas.length, loaded: items.length, failed };
+  },
+
+  addIconTags: (iconId, tags) => {
+    set((state) => {
+      const newIcons = state.icons.map((i) =>
+        i.id === iconId
+          ? { ...i, tags: [...new Set([...(i.tags || []), ...tags])] }
+          : i
+      );
+      saveToStorage(state.projects, newIcons);
+      return { icons: newIcons };
+    });
+  },
+
+  removeIconTag: (iconId, tag) => {
+    set((state) => {
+      const newIcons = state.icons.map((i) =>
+        i.id === iconId
+          ? { ...i, tags: (i.tags || []).filter((t) => t !== tag) }
+          : i
+      );
+      saveToStorage(state.projects, newIcons);
+      return { icons: newIcons };
+    });
+  },
+
+  addProjectTags: (projectId, tags) => {
+    set((state) => {
+      const newProjects = state.projects.map((p) =>
+        p.id === projectId
+          ? { ...p, tags: [...new Set([...(p.tags || []), ...tags])], updatedAt: Date.now() }
+          : p
+      );
+      saveToStorage(newProjects, state.icons);
+      return { projects: newProjects };
+    });
+  },
+
+  removeProjectTag: (projectId, tag) => {
+    set((state) => {
+      const newProjects = state.projects.map((p) =>
+        p.id === projectId
+          ? { ...p, tags: (p.tags || []).filter((t) => t !== tag), updatedAt: Date.now() }
+          : p
+      );
+      saveToStorage(newProjects, state.icons);
+      return { projects: newProjects };
+    });
+  },
+
+  exportProject: async (projectId, options = {}) => {
+    const state = get();
+    const project = state.projects.find((p) => p.id === projectId);
+    if (!project) {
+      toastHandlers.showError('项目不存在');
+      return;
+    }
+
+    const { items: icons, failed } = await state.getIconsInProject(projectId);
+    if (icons.length === 0) {
+      toastHandlers.showError('项目中没有可导出的图标');
+      return;
+    }
+    if (failed > 0) {
+      toastHandlers.showWarning(`${failed} 个图标加载失败，将不会包含在导出文件中`);
+    }
+
+    try {
+      const exportOptions: ExportOptions = {
+        type: 'project',
+        includeProjects: [projectId],
+        exportConfig: true,
+        description: `项目 "${project.name}" 的导出文件`,
+        ...options,
+      };
+      const archive = await createArchive([project], icons, exportOptions);
+      const timestamp = new Date().toISOString().slice(0, 10);
+      const fileName = `${project.name.replace(/[^a-z0-9\u4e00-\u9fa5_-]+/gi, '_')}_${timestamp}.sprite.zip`;
+      downloadBlob(archive, fileName);
+      toastHandlers.showSuccess(`已导出项目 "${project.name}" (${icons.length} 个图标)`);
+    } catch (e) {
+      toastHandlers.showError(`导出失败：${e instanceof Error ? e.message : '未知错误'}`);
+    }
+  },
+
+  exportSelectedIcons: async (iconIds, projectName) => {
+    const state = get();
+    const icons: IconItem[] = [];
+    let failed = 0;
+
+    for (const id of iconIds) {
+      const meta = state.icons.find((i) => i.id === id);
+      if (!meta) {
+        failed++;
+        continue;
+      }
+      const item = await state.getIconItem(meta);
+      if (item) icons.push(item);
+      else failed++;
+    }
+
+    if (icons.length === 0) {
+      toastHandlers.showError('没有可导出的图标');
+      return;
+    }
+    if (failed > 0) {
+      toastHandlers.showWarning(`${failed} 个图标加载失败，将不会包含在导出文件中`);
+    }
+
+    try {
+      const tempProject: Project = {
+        id: generateId(),
+        name: projectName || '导出图标集合',
+        description: `包含 ${icons.length} 个图标的集合`,
+        iconIds: icons.map((i) => i.id),
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      const exportOptions: ExportOptions = {
+        type: 'icons',
+        description: `${icons.length} 个图标的导出文件`,
+        exportConfig: false,
+      };
+      const archive = await createArchive([tempProject], icons, exportOptions);
+      const timestamp = new Date().toISOString().slice(0, 10);
+      const baseName = projectName || 'icons_export';
+      const fileName = `${baseName.replace(/[^a-z0-9\u4e00-\u9fa5_-]+/gi, '_')}_${icons.length}icons_${timestamp}.sprite.zip`;
+      downloadBlob(archive, fileName);
+      toastHandlers.showSuccess(`已导出 ${icons.length} 个图标`);
+    } catch (e) {
+      toastHandlers.showError(`导出失败：${e instanceof Error ? e.message : '未知错误'}`);
+    }
+  },
+
+  importArchive: async (file) => {
+    const result: ImportResult = {
+      success: false,
+      projects: [],
+      icons: [],
+      warnings: [],
+      errors: [],
+    };
+
+    try {
+      const parsed = await parseArchive(file);
+      result.warnings = parsed.warnings;
+      result.errors = parsed.errors;
+      result.migratedFrom = parsed.migratedFrom;
+
+      if (!parsed.success) {
+        toastHandlers.showError(parsed.errors[0] || '导入失败，文件格式无效');
+        return result;
+      }
+
+      const state = get();
+      const existingProjectIds = new Set(state.projects.map((p) => p.id));
+      const existingIconIds = new Set(state.icons.map((i) => i.id));
+
+      const { projects: resolvedProjects, icons: resolvedIcons, renamed } = resolveIdConflicts(
+        JSON.parse(JSON.stringify(parsed.projects)),
+        JSON.parse(JSON.stringify(parsed.icons)),
+        existingProjectIds,
+        existingIconIds
+      );
+
+      if (renamed.length > 0) {
+        const projectRenames = renamed.filter((r) => r.type === 'project').length;
+        const iconRenames = renamed.filter((r) => r.type === 'icon').length;
+        if (projectRenames > 0) {
+          result.warnings.push(`${projectRenames} 个项目ID冲突已自动处理`);
+        }
+        if (iconRenames > 0) {
+          result.warnings.push(`${iconRenames} 个图标ID冲突已自动处理`);
+        }
+      }
+
+      try {
+        for (const icon of resolvedIcons) {
+          await saveIconDataUrl(icon.id, icon.dataUrl);
+        }
+      } catch {
+        toastHandlers.showError('保存图标数据到本地数据库失败');
+        result.errors.push('保存图标数据失败');
+        return result;
+      }
+
+      const newIconMetas = resolvedIcons.map(iconItemToMeta);
+      const mergedProjectNames = new Map<string, number>();
+      state.projects.forEach((p) => mergedProjectNames.set(p.name, 1));
+
+      const finalProjects = resolvedProjects.map((p) => {
+        let finalName = p.name;
+        let counter = 2;
+        while (mergedProjectNames.has(finalName)) {
+          finalName = `${p.name} (${counter++})`;
+        }
+        mergedProjectNames.set(finalName, 1);
+        return { ...p, name: finalName };
+      });
+
+      set((s) => {
+        const newIcons = [...s.icons, ...newIconMetas];
+        const newProjects = [...s.projects, ...finalProjects];
+        saveToStorage(newProjects, newIcons);
+        return {
+          icons: newIcons,
+          projects: newProjects,
+          activeProjectId: s.activeProjectId || finalProjects[0]?.id || null,
+        };
+      });
+
+      result.success = true;
+      result.projects = finalProjects;
+      result.icons = resolvedIcons;
+
+      const msg = `导入成功：${finalProjects.length} 个项目，${resolvedIcons.length} 个图标`;
+      if (result.warnings.length > 0) {
+        toastHandlers.showWarning(`${msg}（有 ${result.warnings.length} 条警告）`);
+      } else {
+        toastHandlers.showSuccess(msg);
+      }
+    } catch (e) {
+      result.errors.push(`导入失败：${e instanceof Error ? e.message : '未知错误'}`);
+      toastHandlers.showError(result.errors[0]);
+    }
+
+    return result;
   },
 }));
 

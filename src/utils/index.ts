@@ -49,6 +49,17 @@ export function downloadText(text: string, filename: string, mime: string = 'tex
   URL.revokeObjectURL(url);
 }
 
+export function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 export function formatDate(ts: number): string {
   const d = new Date(ts);
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -82,6 +93,14 @@ export async function createIconItemsFromFiles(
 }
 
 export function iconItemToMeta(item: IconItem): IconMeta {
-  const { dataUrl: _, ...meta } = item;
+  const meta: IconMeta = {
+    id: item.id,
+    name: item.name,
+    originalName: item.originalName,
+    width: item.width,
+    height: item.height,
+    addedAt: item.addedAt,
+    tags: item.tags,
+  };
   return meta;
 }
